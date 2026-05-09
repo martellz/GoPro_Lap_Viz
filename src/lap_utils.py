@@ -70,7 +70,6 @@ def split_trajectory_into_laps(
     raise ValueError("轨迹从未进入给定矩形区域，无法分圈（请放大矩形或检查坐标列）")
 
   laps: List[Lap] = []
-  print(entries)
   for k in range(len(entries)):
     start = int(entries[k])
     end = int(entries[k + 1]) if k + 1 < len(entries) else len(df)
@@ -180,10 +179,11 @@ def select_start_rectangle_and_split_laps(
     x_col: str = "enu_x",
     y_col: str = "enu_y",
     figsize: Tuple[float, float] = (10.0, 8.0),
-) -> List[Lap]:
-  """交互框选起点矩形并直接分圈。"""
+) -> Tuple[List[Lap], Tuple[float, float, float, float]]:
+  """交互框选起点矩形并直接分圈。返回 (laps, (xmin, xmax, ymin, ymax)) 以便缓存。"""
   rect = select_start_rectangle_interactive(df, x_col=x_col, y_col=y_col, figsize=figsize)
-  return split_trajectory_into_laps(df, *rect, x_col=x_col, y_col=y_col)
+  laps = split_trajectory_into_laps(df, *rect, x_col=x_col, y_col=y_col)
+  return laps, rect
 
 
 def _normalize_time_series(s: pd.Series) -> pd.Series:
