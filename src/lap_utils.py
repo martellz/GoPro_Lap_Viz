@@ -113,6 +113,14 @@ def _configure_matplotlib_cjk_font() -> bool:
   return False
 
 
+def ensure_matplotlib_cjk_font() -> bool:
+  """为 matplotlib 配置可用的中日韩字体（无界面，可重复调用）。
+
+  走缓存跳过了交互框选时也应调用，否则标题/轴标签中的中文会缺字形或显示为方框。
+  """
+  return _configure_matplotlib_cjk_font()
+
+
 def select_start_rectangle_interactive(
     df: pd.DataFrame,
     *,
@@ -124,7 +132,7 @@ def select_start_rectangle_interactive(
   import matplotlib.pyplot as plt
   from matplotlib.widgets import RectangleSelector
 
-  use_cjk_title = _configure_matplotlib_cjk_font()
+  use_cjk_title = ensure_matplotlib_cjk_font()
   state = {"extents": None}
 
   fig, ax = plt.subplots(figsize=figsize)

@@ -27,17 +27,22 @@ from __future__ import annotations
 
 import os
 import sys
+import argparse
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-for p in (str(ROOT), str(SRC)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(SRC))
 
 import matplotlib.pyplot as plt
 
-from lap_utils import read_GPMF_from_csv, select_start_rectangle_and_split_laps, split_trajectory_into_laps
+from lap_utils import (
+    ensure_matplotlib_cjk_font,
+    read_GPMF_from_csv,
+    select_start_rectangle_and_split_laps,
+    split_trajectory_into_laps,
+)
 from lap_cache import cache_skip_enabled, load_session, save_session, session_is_valid
 from lap_video_player import (
     attach_lap_compare_video_player,
@@ -46,11 +51,14 @@ from lap_video_player import (
 )
 
 
-def main(csv_path=None, video_path=None) -> None:
+def main(csv_path=None, video_path=None, compare_spec="") -> None:
     if csv_path is None:
         csv_path = ROOT / "test_data" / "GX10025.csv"
     if video_path is None:
         video_path = ROOT / "test_data" / "GX010025.MP4"
+
+    # 走缓存时不会进入框选流程，须在本脚本里单独配置中文字体链。
+    ensure_matplotlib_cjk_font()
     csv_str = str(csv_path.resolve())
     video_str = str(video_path.resolve()) if video_path.is_file() else ""
 
@@ -89,7 +97,8 @@ def main(csv_path=None, video_path=None) -> None:
             f"lap time: {lap.t_end - lap.t_start:.3f} seconds"
         )
 
-    compare_spec = os.environ.get("LAP_COMPARE_LAPS", "").strip()
+    if not compare_spec:
+        compare_spec = os.environ.get("LAP_COMPARE_LAPS", "").strip()
     picks_1based: list[int] | None = None
     if compare_spec:
         parts = [p.strip() for p in compare_spec.split(",") if p.strip()]
@@ -212,4 +221,9 @@ def main(csv_path=None, video_path=None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="GoPro Lap Viz")
+    parser.add_argument("--csv", type=str, required=False, default=None, help="CSV file path")
+    parser.add_argument("--video", type=str, required=False, default=None, help="Video file path")
+    parser.add_argument("--laps", type=str, required=False, default="", help="Laps to compare")
+    args = parser.parse_args()
+    main(args.csv, args.video, args.laps)

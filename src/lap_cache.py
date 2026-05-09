@@ -45,6 +45,7 @@ def session_cache_path(csv_path: str, video_path: str) -> Path:
 
 def load_session(csv_path: str, video_path: str) -> Optional[Dict[str, Any]]:
     p = session_cache_path(csv_path, video_path)
+    print(f"session_cache_path: {p}")
     if not p.is_file():
         return None
     try:
