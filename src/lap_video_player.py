@@ -24,9 +24,9 @@ if TYPE_CHECKING:
 
 from lap_cache import (
     cache_skip_enabled,
-    segment_bundle_dir,
-    try_read_segment_cache,
-    write_segment_manifest,
+    single_lap_segment_dir,
+    try_read_single_lap_segment,
+    write_single_lap_segment_manifest,
 )
 
 # Inspiration: https://github.com/maximus009/VideoPlayer/blob/master/new_test_3.py
@@ -480,81 +480,107 @@ class CV2LapCompareVideoPlayer:
         ffmpeg_ok = shutil.which("ffmpeg") is not None
         if use_ffmpeg_segments and ffmpeg_ok:
             out_w = max(int(self._video_width), 1)
-            cached_paths: Optional[List[str]] = None
-            if do_cache_read:
-                try:
-                    cached_paths = try_read_segment_cache(
-                        filename, self._offset, out_w, self._laps
-                    )
-                except Exception:
-                    cached_paths = None
-            if cached_paths:
-                paths_to_open = cached_paths
-                self._using_segments = True
-                self._segment_frames_prescaled = True
-                self._segment_tmpdir = None
-                print(
-                    "[LapCompare] 已命中切片缓存，"
-                    f"{out_w}px 宽，跳过 ffmpeg。"
-                )
-            else:
-                bundle_dir: Optional[Path] = None
-                if do_cache_write:
-                    try:
-                        lap_ranges = [
-                            (lap.t_start, lap.t_end) for lap in self._laps
-                        ]
-                        bundle_dir = segment_bundle_dir(
-                            filename, self._offset, out_w, lap_ranges
-                        )
-                        bundle_dir.mkdir(parents=True, exist_ok=True)
-                    except OSError:
-                        bundle_dir = None
+            tmpdir: Optional[str] = None
+            n_from_cache = 0
+            try:
+                for i, lap in enumerate(self._laps):
+                    hit: Optional[str] = None
+                    if do_cache_read:
+                        try:
+                            hit = try_read_single_lap_segment(
+                                filename, self._offset, out_w, lap
+                            )
+                        except Exception:
+                            hit = None
+                    if hit:
+                        paths_to_open.append(hit)
+                        n_from_cache += 1
+                        continue
 
-                tmpdir: Optional[str] = None
-                if bundle_dir is None:
-                    tmpdir = tempfile.mkdtemp(prefix="lapcompare_seg_")
-                    self._segment_tmpdir = tmpdir
-                    target_root = Path(tmpdir)
-                else:
-                    target_root = bundle_dir
-
-                try:
-                    for i, lap in enumerate(self._laps):
-                        t0 = max(0.0, lap.t_start - self._offset)
-                        dur = max(lap.t_end - lap.t_start, 0.05)
-                        outp = target_root / f"lap_{i}.mp4"
+                    t0 = max(0.0, lap.t_start - self._offset)
+                    dur = max(lap.t_end - lap.t_start, 0.05)
+                    wrote_cache = False
+                    if do_cache_write:
+                        clip_dir_t: Optional[Path] = None
+                        try:
+                            clip_dir_t = single_lap_segment_dir(
+                                filename,
+                                self._offset,
+                                out_w,
+                                lap.t_start,
+                                lap.t_end,
+                            )
+                            clip_dir_t.mkdir(parents=True, exist_ok=True)
+                            outp = clip_dir_t / "clip.mp4"
+                            _lapcompare_ffmpeg_cut(
+                                filename,
+                                t0,
+                                dur,
+                                str(outp),
+                                output_width=out_w,
+                            )
+                            write_single_lap_segment_manifest(
+                                clip_dir_t,
+                                filename,
+                                self._offset,
+                                out_w,
+                                lap,
+                            )
+                            paths_to_open.append(str(outp.resolve()))
+                            wrote_cache = True
+                        except OSError:
+                            wrote_cache = False
+                        except Exception:
+                            wrote_cache = False
+                            if clip_dir_t is not None:
+                                for orphan in ("clip.mp4", "manifest.json"):
+                                    p = clip_dir_t / orphan
+                                    if p.is_file():
+                                        try:
+                                            p.unlink()
+                                        except OSError:
+                                            pass
+                    if not wrote_cache:
+                        if tmpdir is None:
+                            tmpdir = tempfile.mkdtemp(prefix="lapcompare_seg_")
+                            self._segment_tmpdir = tmpdir
+                        outp = os.path.join(tmpdir, f"lap_{i}.mp4")
                         _lapcompare_ffmpeg_cut(
                             filename,
                             t0,
                             dur,
-                            str(outp),
+                            outp,
                             output_width=out_w,
                         )
-                        paths_to_open.append(str(outp.resolve()))
-                    if bundle_dir is not None:
-                        write_segment_manifest(
-                            bundle_dir,
-                            filename,
-                            self._offset,
-                            out_w,
-                            self._laps,
-                        )
-                        self._segment_tmpdir = None
-                    self._using_segments = True
-                    self._segment_frames_prescaled = True
+                        paths_to_open.append(outp)
+
+                self._using_segments = True
+                self._segment_frames_prescaled = True
+                if tmpdir is None:
+                    self._segment_tmpdir = None
+                if n_from_cache == len(self._laps):
+                    print(
+                        "[LapCompare] 已命中切片缓存（按单圈），"
+                        f"{out_w}px 宽，跳过 ffmpeg。"
+                    )
+                elif n_from_cache > 0:
+                    print(
+                        "[LapCompare] 部分圈使用切片缓存，"
+                        f"{out_w}px 宽；其余已 ffmpeg 切片。"
+                    )
+                else:
                     print(
                         "[LapCompare] ffmpeg 已切片并缩放到 "
                         f"{out_w}px 宽，播放时不再逐帧 resize。"
                     )
-                except Exception as exc:
-                    print(f"[LapCompare] ffmpeg 切片失败，改用整文件（易卡）：{exc}")
-                    if tmpdir:
-                        shutil.rmtree(tmpdir, ignore_errors=True)
-                    self._segment_tmpdir = None
-                    paths_to_open = []
-                    self._using_segments = False
-                    self._segment_frames_prescaled = False
+            except Exception as exc:
+                print(f"[LapCompare] ffmpeg 切片失败，改用整文件（易卡）：{exc}")
+                if tmpdir:
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+                self._segment_tmpdir = None
+                paths_to_open = []
+                self._using_segments = False
+                self._segment_frames_prescaled = False
 
         if not paths_to_open:
             paths_to_open = [filename] * len(self._laps)
@@ -928,8 +954,8 @@ def attach_lap_compare_video_player(
 
     环境变量 ``LAP_COMPARE_NO_FFMPEG=1``：强制不切片段（整文件 seek，易卡）。
 
-    切片与会话的磁盘缓存：默认开启；``LAP_VIZ_SKIP_CACHE=1`` 跳过读/写。
-    缓存目录：``LAP_VIZ_CACHE`` 或 ``~/.cache/gopro_lap_viz``。
+    切片按「单圈时间段」持久化（换对比组合时复用已有切片）；会话缓存仅存矩形与时间偏移。
+    默认开启；``LAP_VIZ_SKIP_CACHE=1`` 跳过读/写。
 
     ``ax_track``: 若提供，将在 ENU 轨迹上绘制每圈当前 ``tau`` 对应的车位点（与轨迹同色）。
     ``track_marker_colors``: 每圈标记颜色，默认 ``C0``..``C9`` 循环。

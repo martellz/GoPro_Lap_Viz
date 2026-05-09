@@ -15,9 +15,10 @@
 
 运行前请安装 ffmpeg（例如 apt install ffmpeg）。
 
-缓存（跳过下次框选与 ffmpeg 切片）：
-  - 默认写入 ~/.cache/gopro_lap_viz（或 XDG_CACHE_HOME，或环境变量 LAP_VIZ_CACHE）
-  - LAP_VIZ_SKIP_CACHE=1：禁用会话与切片缓存
+缓存（跳过下次框选；切片按圈复用）：
+  - 会话仅存起点矩形与时间偏移，不记上次对比的圈号；换 LAP_COMPARE_LAPS 不会触发重新框选
+  - ffmpeg 输出按「每圈 t_start/t_end」单独落盘，换组合只编新出现的圈
+  - 目录：~/.cache/gopro_lap_viz（或 XDG_CACHE_HOME、LAP_VIZ_CACHE）；LAP_VIZ_SKIP_CACHE=1 禁用缓存
 
 运行（项目根目录）：
   python test/test_lap_utils.py
@@ -111,19 +112,6 @@ def main(csv_path=None, video_path=None, compare_spec="") -> None:
             )
         selected = [laps[i] for i in picks0]
         labels = [f"Lap {picks_1based[j]}" for j in range(len(selected))]
-    elif valid and session_data is not None and session_data.get(
-        "compare_lap_indices_1based"
-    ):
-        picks_1based = [int(x) for x in session_data["compare_lap_indices_1based"]]
-        picks0 = [p - 1 for p in picks_1based]
-        bad = [p for p in picks0 if p < 0 or p >= len(laps)]
-        if bad:
-            picks_1based = None
-            selected = None
-            labels = None
-        else:
-            selected = [laps[i] for i in picks0]
-            labels = [f"Lap {picks_1based[j]}" for j in range(len(selected))]
     else:
         selected = None
         labels = None
@@ -132,11 +120,7 @@ def main(csv_path=None, video_path=None, compare_spec="") -> None:
         picks0 if selected is not None else list(range(len(laps)))
     )
 
-    if (
-        use_cache
-        and video_str
-        and (not valid or compare_spec)
-    ):
+    if use_cache and video_str and not valid:
         xmin, xmax, ymin, ymax = rect
         save_session(
             csv_str,
@@ -146,9 +130,8 @@ def main(csv_path=None, video_path=None, compare_spec="") -> None:
             ymin=ymin,
             ymax=ymax,
             video_time_offset=time_offset,
-            compare_lap_indices_1based=picks_1based,
         )
-        print("已更新会话缓存（矩形 / 时间偏移 / 对比圈号）。")
+        print("已更新会话缓存（矩形 / 时间偏移）。")
 
     fig, (ax_track, ax_speed) = plt.subplots(
         1, 2, figsize=(14, 5), gridspec_kw={"width_ratios": [1.1, 1]}

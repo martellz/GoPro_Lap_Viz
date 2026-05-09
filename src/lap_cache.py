@@ -1,4 +1,4 @@
-"""会话缓存（起点矩形、对比圈号）、ffmpeg 切片持久化，避免每次启动重复交互与转码。"""
+"""会话缓存（起点矩形、时间偏移）、按单圈持久化 ffmpeg 切片。"""
 
 from __future__ import annotations
 
@@ -6,9 +6,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-CACHE_VERSION = 1
+# 会话 JSON（矩形、offset）；不含对比圈号
+SESSION_CACHE_VERSION = 1
+# 每个切片目录内 manifest.json 的版本号
+LAP_CLIP_MANIFEST_VERSION = 1
 
 
 def cache_root() -> Path:
@@ -45,7 +48,6 @@ def session_cache_path(csv_path: str, video_path: str) -> Path:
 
 def load_session(csv_path: str, video_path: str) -> Optional[Dict[str, Any]]:
     p = session_cache_path(csv_path, video_path)
-    print(f"session_cache_path: {p}")
     if not p.is_file():
         return None
     try:
@@ -56,7 +58,7 @@ def load_session(csv_path: str, video_path: str) -> Optional[Dict[str, Any]]:
 
 
 def session_is_valid(data: Dict[str, Any], csv_path: str, video_path: str) -> bool:
-    if int(data.get("version", -1)) != CACHE_VERSION:
+    if int(data.get("version", -1)) != SESSION_CACHE_VERSION:
         return False
     if not fingerprint_match(data.get("csv_fingerprint"), file_fingerprint(csv_path)):
         return False
@@ -79,13 +81,12 @@ def save_session(
     ymin: float,
     ymax: float,
     video_time_offset: float,
-    compare_lap_indices_1based: Optional[List[int]] = None,
 ) -> None:
     root = cache_root()
     (root / "sessions").mkdir(parents=True, exist_ok=True)
     path = session_cache_path(csv_path, video_path)
     payload: Dict[str, Any] = {
-        "version": CACHE_VERSION,
+        "version": SESSION_CACHE_VERSION,
         "csv_fingerprint": file_fingerprint(csv_path),
         "video_fingerprint": file_fingerprint(video_path),
         "video_time_offset": float(video_time_offset),
@@ -96,102 +97,92 @@ def save_session(
             "ymax": float(ymax),
         },
     }
-    if compare_lap_indices_1based is not None:
-        payload["compare_lap_indices_1based"] = [
-            int(x) for x in compare_lap_indices_1based
-        ]
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=True)
 
 
-def segment_bundle_dir(
+def single_lap_segment_dir(
     video_path: str,
     video_time_offset: float,
     output_width: int,
-    lap_time_ranges: List[Tuple[float, float]],
+    t_start: float,
+    t_end: float,
 ) -> Path:
-    laps_norm = sorted(
-        (round(float(a), 4), round(float(b), 4)) for a, b in lap_time_ranges
-    )
+    """单圈切片缓存目录（与对比选了哪几圈无关，只由时间区间与视频指纹决定）。"""
+    a, b = round(float(t_start), 4), round(float(t_end), 4)
     vid_fp = file_fingerprint(video_path)
     payload = {
-        "cache_v": CACHE_VERSION,
-        "laps": laps_norm,
+        "clip_v": LAP_CLIP_MANIFEST_VERSION,
+        "lap": [a, b],
         "offset": round(float(video_time_offset), 6),
         "video": vid_fp,
         "width": int(output_width),
     }
     raw = json.dumps(payload, sort_keys=True).encode("utf-8")
     bid = hashlib.sha256(raw).hexdigest()[:28]
-    return cache_root() / "segments" / bid
+    return cache_root() / "segments" / "by_lap" / bid
 
 
-def try_read_segment_cache(
+def try_read_single_lap_segment(
     video_path: str,
     video_time_offset: float,
     output_width: int,
-    laps: List[Any],
-) -> Optional[List[str]]:
-    """若缓存完整且视频指纹、圈时间段一致，返回各圈切片绝对路径列表。"""
+    lap: Any,
+) -> Optional[str]:
+    """若该圈切片已缓存且校验通过，返回 clip.mp4 绝对路径，否则 None。"""
     try:
-        lap_ranges = [(lap.t_start, lap.t_end) for lap in laps]
-        d = segment_bundle_dir(
-            video_path, video_time_offset, output_width, lap_ranges
+        d = single_lap_segment_dir(
+            video_path,
+            video_time_offset,
+            output_width,
+            lap.t_start,
+            lap.t_end,
         )
     except OSError:
         return None
     man_path = d / "manifest.json"
-    if not man_path.is_file():
+    clip = d / "clip.mp4"
+    if not man_path.is_file() or not clip.is_file():
         return None
     try:
         with open(man_path, encoding="utf-8") as f:
             man: Dict[str, Any] = json.load(f)
     except (json.JSONDecodeError, OSError):
         return None
-    if int(man.get("version", -1)) != CACHE_VERSION:
+    if int(man.get("version", -1)) != LAP_CLIP_MANIFEST_VERSION:
         return None
     if not fingerprint_match(
         man.get("video_fingerprint"), file_fingerprint(video_path)
     ):
         return None
-    if int(man.get("num_laps", -1)) != len(laps):
-        return None
     if int(man.get("output_width", -1)) != int(output_width):
         return None
     if abs(float(man.get("video_time_offset", 0.0)) - float(video_time_offset)) > 1e-5:
         return None
-    stored_ranges = man.get("lap_ranges")
-    if not stored_ranges or len(stored_ranges) != len(laps):
+    if abs(float(man.get("t_start", 0.0)) - float(lap.t_start)) > 0.05:
         return None
-    for i, lap in enumerate(laps):
-        a, b = stored_ranges[i]
-        if abs(float(a) - lap.t_start) > 0.05 or abs(float(b) - lap.t_end) > 0.05:
-            return None
-
-    paths: List[str] = []
-    for i in range(len(laps)):
-        fp = d / f"lap_{i}.mp4"
-        if not fp.is_file() or fp.stat().st_size < 800:
-            return None
-        paths.append(str(fp.resolve()))
-    return paths
+    if abs(float(man.get("t_end", 0.0)) - float(lap.t_end)) > 0.05:
+        return None
+    if clip.stat().st_size < 800:
+        return None
+    return str(clip.resolve())
 
 
-def write_segment_manifest(
+def write_single_lap_segment_manifest(
     bundle_dir: Path,
     video_path: str,
     video_time_offset: float,
     output_width: int,
-    laps: List[Any],
+    lap: Any,
 ) -> None:
     bundle_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
-        "version": CACHE_VERSION,
+        "version": LAP_CLIP_MANIFEST_VERSION,
         "video_fingerprint": file_fingerprint(video_path),
         "video_time_offset": float(video_time_offset),
         "output_width": int(output_width),
-        "num_laps": len(laps),
-        "lap_ranges": [[float(lap.t_start), float(lap.t_end)] for lap in laps],
+        "t_start": float(lap.t_start),
+        "t_end": float(lap.t_end),
     }
     with open(bundle_dir / "manifest.json", "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, sort_keys=True)
